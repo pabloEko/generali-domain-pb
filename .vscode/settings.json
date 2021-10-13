@@ -1,0 +1,51 @@
+{
+    "editor.rulers": [120],
+    "editor.codeActionsOnSave": {
+        "source.fixAll": false,
+        "source.fixAll.eslint": true
+    },
+    "editor.defaultFormatter": "dbaeumer.vscode-eslint",
+    "[yaml]": {
+        "editor.defaultFormatter": "esbenp.prettier-vscode",
+    },
+    "editor.formatOnSave": true,
+    "prettier.requireConfig": false,
+    "json.schemas": [
+        {
+            "fileMatch": [
+                "/test/scenario/**.json",
+                "/test/scenario/**.json5"
+            ],
+            "url": "/node_modules/@ekonoo/ekonoo-testing/jsonSchema.json"
+        }
+    ],
+    "yaml.customTags": [
+        "!And",
+        "!And sequence",
+        "!If",
+        "!If sequence",
+        "!Not",
+        "!Not sequence",
+        "!Equals",
+        "!Equals sequence",
+        "!Or",
+        "!Or sequence",
+        "!FindInMap",
+        "!FindInMap sequence",
+        "!Base64",
+        "!Join",
+        "!Join sequence",
+        "!Cidr",
+        "!Ref",
+        "!Sub",
+        "!Sub sequence",
+        "!GetAtt",
+        "!GetAZs",
+        "!ImportValue",
+        "!ImportValue sequence",
+        "!Select",
+        "!Select sequence",
+        "!Split",
+        "!Split sequence"
+    ]
+}

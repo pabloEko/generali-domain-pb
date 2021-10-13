@@ -1,0 +1,8 @@
+dist/
+coverage/
+node-modules/
+docs/
+environments/
+tools/
+.eslintrc.js
+webpack.config.js

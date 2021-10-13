@@ -1,0 +1,101 @@
+# provide a Stack::Application to setup a management consumer lambda
+
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  QueueTimeout:
+    Type: Number
+    Default: 30
+  Layer:
+    Type: String
+    Default: ""
+  EventBusName:
+    Description: "the event bus used to put message and read messages. used to test the domain without interferences with others"
+    Type: String
+    Default: default
+  FifoQueuePrefix:
+    Description: "the prefix to add to the fifo queues, used to bypass a bug in sam"
+    Type: String
+  QueueReceiveCount:
+    Description: "the number of time a message will be sent before going to DLQ"
+    Type: Number
+    Default: 1  # for a e2e app, this is easyer to have a fail fast frow
+  BatchSize:
+    Type: Number
+    MinValue: 1
+    MaxValue: 10
+    Default: 10
+  DynamoTable:
+    Type: String
+    Default: ""
+  LoggerLevel:
+    Description: "the logger lever used to filter output, can be on of error,warning,info,trace"
+    Type: String
+    Default: info
+  ServiceName:
+    Description: "the name of the service for the management layer. make sur it’s the same on all lambdas for the service"
+    Type: String
+
+Globals:
+  Function:
+    Runtime: nodejs12.x
+    Timeout: 180
+    Tracing: Active
+    Layers: !If [ IsLayerEmpty, "", [ !Ref Layer ] ] # Set default layer for all lambdas
+    Environment:
+      Variables:
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+        NODE_OPTIONS: "--enable-source-maps"
+        LOGGER_LEVEL: !Ref LoggerLevel
+        EVENT_BUS_NAME: !Ref EventBusName
+        TABLE_NAME: !Ref DynamoTable
+        SERVICE_NAME: !Ref ServiceName
+        SQS_RPC_QUEUE: !GetAtt Management.Outputs.ManagementTimeoutQueue
+
+Conditions:
+  IsLayerEmpty: !Equals [!Ref Layer, ""]
+
+Resources:
+  Management:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location:
+        ApplicationId: arn:aws:serverlessrepo:eu-west-1:010875653916:applications/management
+        SemanticVersion: 1.0.3
+      Parameters:
+        EventBusName: !Ref EventBusName
+        FifoQueuePrefix: !Ref FifoQueuePrefix
+        QueueTimeout: 185
+        ServiceName: !Ref ServiceName
+
+  ManagementLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../dist/management/
+      Handler: index.handler
+      Events:
+        RpcCallEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt Management.Outputs.ManagementQueueArn
+            BatchSize: 10
+        RpcTimeoutEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt Management.Outputs.ManagementTimeoutQueueArn
+            BatchSize: 10
+      Policies:
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref EventBusName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoTable
+        - SQSSendMessagePolicy:
+             QueueName: !GetAtt Management.Outputs.ManagementTimeoutQueue
+
+
+Outputs:
+  ManagementQueue:
+    Value: !GetAtt Management.Outputs.ManagementQueue
+  ManagementTimeoutQueue:
+    Value: !GetAtt Management.Outputs.ManagementTimeoutQueue

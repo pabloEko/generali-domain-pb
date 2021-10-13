@@ -1,0 +1,12 @@
+templates:
+  - ./**/sam/**/*.yml
+ignore_templates:
+  - ./**/*-output.yml
+  - ./*.json
+regions:
+  - us-east-1
+  - eu-west-1
+# ignore_checks:
+#   - W3011 # W3011 Both UpdateReplacePolicy and DeletionPolicy are needed to protect <Resource> from deletion
+#   - W2001 # W2001 Parameter <Resource> not used.
+#   - W8001 # W8001 Condition <Resource> not used

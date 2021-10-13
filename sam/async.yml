@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  Layer:
+    Type: String
+    Default: ""
+  EnableLambdaTracing:
+    Description: Enable X-Ray tracing in Lambdas
+    Type: String
+    AllowedValues:
+      - Active
+      - PassThrough
+  QueueTimeout:
+    Type: Number
+    Default: 30
+  LoggerLevel:
+    Description: "the logger lever used to filter output, can be on of error,warning,info,trace"
+    Type: String
+    Default: info
+  EventBusName:
+    Description: "the event bus used to put message and read messages. used to test the domain without interferences with others"
+    Type: String
+    Default: default
+  FifoQueuePrefix:
+    Description: "the prefix to add to the fifo queues, used to bypass a bug in sam"
+    Type: String
+  QueueReceiveCount:
+    Description: "the number of time a message will be sent before going to DLQ"
+    Type: Number
+    Default: 5
+  BatchSize:
+    Type: Number
+    MinValue: 1
+    MaxValue: 10
+    Default: 10
+
+Globals:
+  Function:
+    Runtime: nodejs12.x
+    Timeout: 25 # Default Visibility Timeout for SQS is 30 seconds. TODO: Consider creating custom queue.
+    Tracing: !Ref EnableLambdaTracing
+    Layers: !If [IsLayerEmpty, "", [!Ref Layer]] # Set default layer for all lambdas
+    # If is required here to pass a list of layers, or an empty string (not an empty list)
+    Environment:
+      Variables:
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+        LOGGER_LEVEL: !Ref LoggerLevel
+        NODE_OPTIONS: "--enable-source-maps"
+        EVENT_BUS_NAME: !Ref EventBusName
+
+Conditions:
+  IsLayerEmpty: !Equals [!Ref Layer, ""]
+
+Resources:
+  Dummy:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      CodeUri: ../dist/dummy
+
+  # queue struct to handle
+  # lu.ekonoo.my-service.my-module.my-state
+  #  => queue + DLQ
+  #  => MyQueuedLambda
+  MyQueuedLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      CodeUri: ../dist/dummy
+      Events:
+        MyQueuedRecieveEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt MyQueuedQueue.Arn
+            BatchSize: !Ref BatchSize
+      Policies: {}
+
+  MyQueuedQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${FifoQueuePrefix}-MyQueuedQueue.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: !Ref QueueTimeout
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt MyQueuedDLQ.Arn
+        maxReceiveCount: !Ref QueueReceiveCount
+
+  MyQueuedDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${FifoQueuePrefix}-MyQueuedDLQ.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+
+  MyQueuedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref EventBusName
+      EventPattern:
+        source:
+          - lu.ekonoo.my-service.my-module
+        detail-type:
+          - my-state
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt MyQueuedQueue.Arn
+          SqsParameters:
+            MessageGroupId: "MyQueued"
+          Id: "TargetFunctionV1"
+
+  MyQueuedQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref MyQueuedQueue
+      PolicyDocument:
+        Statement:
+          - Action:
+              - "SQS:SendMessage"
+            Effect: "Allow"
+            Resource: !GetAtt MyQueuedQueue.Arn
+            Principal:
+              Service:
+                - "events.amazonaws.com"
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt MyQueuedRule.Arn
+
+    # end queue for MyQueuedLambda

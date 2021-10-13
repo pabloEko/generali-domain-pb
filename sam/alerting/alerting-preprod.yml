@@ -1,0 +1,287 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Ekonoo Dummy Domain health monitoring (preprod)
+
+Parameters:
+  # Aurora Serverless RDS
+  DBClusterName:
+    Type: String
+  MaxCapacity:
+    Type: Number
+    Default: 4
+  # DynamoDB
+  TableName:
+    Type: String
+  # API Gateway
+  ApiName:
+    Type: String
+  ApiStage:
+    Type: String
+  # Lambda
+  LambdaName:
+    Type: String
+  # SQS
+  DeadLetterQueueName:
+    Type: String
+  DlqName1:
+    Type: String
+  DlqName2:
+    Type: String
+  AlarmEmailReceiver:
+    Type: String
+    Default: monitoring@ekonoo.com
+
+Resources:
+  CloudWatchAlarmTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      Subscription:
+        - Protocol: email
+          Endpoint: !Ref AlarmEmailReceiver
+
+  # Available AWS Alerts for API Gateway
+  # https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-metrics-and-dimensions.html
+  APIGatewayHigh5xxErrorVolume:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: API Gateway excessive 500 errors
+      AlarmActions:
+        - !Ref CloudWatchAlarmTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Threshold: 0.2 # The average of an API Gateway 4xx and 5xx error is a percentage and not a count
+      Statistic: Average
+      EvaluationPeriods: 5
+      Period: 60
+      MetricName: 5XXError
+      Namespace: AWS/ApiGateway
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref ApiName
+        - Name: Stage
+          Value: !Ref ApiStage
+
+  APIGatewayHigh4xxErrorVolume:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: API Gateway excessive 400 errors
+      AlarmActions:
+        - !Ref CloudWatchAlarmTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Threshold: 0.2 # The average of an API Gateway 4xx and 5xx error is a percentage and not a count
+      Statistic: Average
+      EvaluationPeriods: 5
+      Period: 60
+      MetricName: 4XXError
+      Namespace: AWS/ApiGateway
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref ApiName
+        - Name: Stage
+          Value: !Ref ApiStage
+
+  APIGatewayHighLatency:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: API Gateway excessive latency
+      AlarmActions:
+        - !Ref CloudWatchAlarmTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Threshold: 500
+      Statistic: Average
+      EvaluationPeriods: 5
+      Period: 60
+      MetricName: Latency
+      Namespace: AWS/ApiGateway
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref ApiName
+        - Name: Stage
+          Value: !Ref ApiStage
+
+  # Available AWS Alerts for RDS Aurora Serverless
+  # https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Monitoring.html
+  DBStatusRedAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: Aurora Serverless Cluster size has reached the maximum capacity
+      AlarmActions:
+        - !Ref CloudWatchAlarmTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Threshold: !Ref MaxCapacity
+      Statistic: Maximum
+      EvaluationPeriods: 2
+      Period: 60
+      MetricName: ServerlessDatabaseCapacity
+      Namespace: AWS/RDS
+      Dimensions:
+        - Name: DBClusterIdentifier
+          Value: !Ref DBClusterName
+
+  # Available AWS Alerts for DynamoDB
+  # https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/metrics-dimensions.html
+  DynamoDBExcessiveReadCapacity:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: DynamoDB consumed read capcity units is high
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref CloudWatchAlarmTopic
+      Threshold: 0.7
+      Statistic: Average
+      EvaluationPeriods: 2
+      Period: 300
+      MetricName: ConsumedReadCapacityUnits
+      Namespace: AWS/RDS
+      Dimensions:
+        - Name: TableIdentifier
+          Value: !Ref TableName
+
+  DynamoDBExcessiveWriteCapacity:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: DynamoDB consumed write capcity units is high
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions:
+        - !Ref CloudWatchAlarmTopic
+      Threshold: 0.7
+      Statistic: Average
+      EvaluationPeriods: 2
+      Period: 300
+      MetricName: ConsumedWriteCapacityUnits
+      Namespace: AWS/RDS
+      Dimensions:
+        - Name: TableIdentifier
+          Value: !Ref TableName
+
+  LambdaExcessiveConcurrentExecutions:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref CloudWatchAlarmTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      EvaluationPeriods: 1
+      Threshold: 50
+      Period: 60
+      Statistic: Maximum
+      MetricName: ConcurrentExecutions
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaName
+
+  LambdaExcessiveAverageRuntime:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref CloudWatchAlarmTopic
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      EvaluationPeriods: 2
+      Threshold: 500 # Milliseconds
+      Period: 60
+      Statistic: Average
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaName
+
+  LambdaExcessiveErrorRate: # For this example we accept a 5% error rate
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref CloudWatchAlarmTopic
+      ComparisonOperator: LessThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      EvaluationPeriods: 2
+      Threshold: 95
+      Metrics:
+        - Id: errors
+          ReturnData: False
+          MetricStat:
+            Period: 60
+            Stat: Sum
+            Metric:
+              MetricName: Errors
+              Namespace: AWS/Lambda
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref LambdaName
+        - Id: invocations
+          ReturnData: False
+          MetricStat:
+            Period: 60
+            Stat: Sum
+            Metric:
+              MetricName: Invocations
+              Namespace: AWS/Lambda
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref LambdaName
+        - Id: availability
+          Expression: 100 - 100 * errors / MAX([errors, invocations])
+          Label: SuccessRate
+
+  DLQEventReceived:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmActions:
+        - !Ref CloudWatchAlarmTopic
+      AlarmDescription: "There are failed messages in the dead letter queue."
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+      Dimensions:
+        - Name: QueueName
+          Value: !Ref DeadLetterQueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+
+  DLQEventReceivedSum:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "There are failed messages in a dead letter queue."
+      AlarmActions:
+        - !Ref CloudWatchAlarmTopic
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      Threshold: 0
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: dlq_name_1
+          ReturnData: False
+          MetricStat:
+            Period: 60
+            Stat: Sum
+            Metric:
+              MetricName: ApproximateNumberOfMessagesVisible
+              Namespace: AWS/SQS
+              Dimensions:
+                - Name: QueueName
+                  Value: !Ref DlqName1
+        - Id: dlq_name_2
+          ReturnData: False
+          MetricStat:
+            Period: 60
+            Stat: Sum
+            Metric:
+              MetricName: ApproximateNumberOfMessagesVisible
+              Namespace: AWS/SQS
+              Dimensions:
+                - Name: QueueName
+                  Value: !Ref DlqName2
+        - Id: total_notification_repo
+          Expression: SUM([
+            dlq_name1,
+            dlq_name2])
+          Label: SumOfVisibleEvents

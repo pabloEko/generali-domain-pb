@@ -1,0 +1,31 @@
+name: Dependabot Pull Request
+
+on:
+  pull_request_target:
+    branches: [master]
+
+env:
+  CI: true
+  env: test
+  gitVersion: ${{ github.ref }}
+  SAM_CLI_TELEMETRY: 0
+  PYTHON_VERSION: "3.8"
+  AWS_REGION: eu-west-1
+  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+jobs:
+  deploy-pr:
+    runs-on: ubuntu-20.04
+    environment: test
+
+    if: github.actor == 'dependabot[bot]'
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Webpack build
+        run: make build

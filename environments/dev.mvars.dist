@@ -1,0 +1,2 @@
+# LoggerLevel ?= debug  # more verbose in dev
+# QueueReceiveCount ?= 1  # less retry in dev

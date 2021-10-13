@@ -1,0 +1,180 @@
+# This template pipeline illustrates how to fetch some
+# stack outputs cross environment or cross-region
+#
+name: Master deployment (Test & Staging)
+
+on:
+  push:
+    branches: [master]
+    paths-ignore:
+      - "README.md"
+
+env:
+  CI: true
+  gitVersion: ${{ github.ref }}
+  SAM_CLI_TELEMETRY: 0
+  NODE_VERSION: "12.13.0"
+  PYTHON_VERSION: "3.8"
+  AWS_REGION: eu-west-1
+  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+  AWS_RETRY_MODE: adaptive
+
+jobs:
+  deploy-test:
+    runs-on: ubuntu-20.04
+    environment: test
+
+    env:
+      env: test
+      monitoringEmail: no-notifications
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v2
+
+      - name: Install Node JS
+        uses: actions/setup-node@v1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install AWS SAM CLI
+        run: pip3 install aws-sam-cli
+
+      - name: Webpack build
+        run: make build
+
+      # Temporarily change to the test account credential
+      # To make the outputs of the stacks we need as dependency
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CF_TEST_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_CF_TEST_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Fetch Cognito outputs to be able to get the user pools
+      - name: Fetch cognito stack outputs from Test env
+        run: make ekonoo-cognito-${{ env.env }}.outputs
+
+      # Fetch ES outputs to be able to query ES
+      - name: Fetch es stack outputs from Test env
+        run: make ekonoo-domain-elasticsearch-${{ env.env }}.outputs
+
+      # Switch back to test Core account to package and deploy
+      - name: Configure Core AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CF_TEST_CORE_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_CF_TEST_CORE_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Package an deploy as needed. Do not make clean or make all
+      # as this will delete the test account outputs files we generated above
+      - name: Package CloudFormation
+        run: make package
+
+      - name: Deploy CloudFormation
+        run: make deploy
+
+      - name: Deploy Alerting
+        run: make deploy-alerting
+
+      - name: Configure Core E2E AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CF_TEST_CORE_E2E_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_CF_TEST_CORE_E2E_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Test E2E
+        if: ${{ github.event_name == 'pull_request' }}
+        run: make test-e2e
+
+      - uses: actions/upload-artifact@v2
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        with:
+          name: e2e-results
+          path: report.xml
+
+      - name: Publish E2E Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v1.6
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          files: report.xml
+
+      - name: trigger management ON_DEPLOY
+        run: make trigger-on-deployed
+
+  deploy-staging:
+    needs: deploy-test
+    runs-on: ubuntu-20.04
+    environment: staging
+
+    env:
+      env: staging
+      monitoringEmail: infra-team@ekonoo.com
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v2
+
+      - name: Install Node JS
+        uses: actions/setup-node@v1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install AWS SAM CLI
+        run: pip3 install aws-sam-cli
+
+      - name: Webpack build
+        run: make build
+
+      # Temporarily change to the staging account credential
+      # To make the outputs of the stacks we need as dependency
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CF_STAGING_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_CF_STAGING_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Fetch Cognito outputs to be able to get the user pools
+      - name: Fetch cognito stack outputs from Staging env
+        run: make ekonoo-cognito-${{ env.env }}.outputs
+
+      # Fetch ES outputs to be able to query ES
+      - name: Fetch es stack outputs from Staging env
+        run: make ekonoo-domain-elasticsearch-${{ env.env }}.outputs
+
+      # Switch back to staging Core account to package and deploy
+      - name: Configure Core AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CF_STAGING_CORE_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_CF_STAGING_CORE_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Package an deploy as needed. Do not make clean or make all
+      # as this will delete the staging account outputs files we generated above
+      - name: Package CloudFormation
+        run: make package
+
+      - name: Deploy CloudFormation
+        run: make deploy
+
+      - name: Deploy Alerting
+        run: make deploy-alerting
+
+      - name: trigger management ON_DEPLOY
+        run: make trigger-on-deployed

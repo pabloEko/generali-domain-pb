@@ -1,0 +1,63 @@
+name: Stack cleanup
+
+on:
+  pull_request:
+    types: [closed]
+
+env:
+  CI: true
+  env: test
+  SAM_CLI_TELEMETRY: 0
+  NODE_VERSION: "12.13.0"
+  PYTHON_VERSION: "3.8"
+  AWS_REGION: eu-west-1
+  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+  AWS_RETRY_MODE: adaptive
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-20.04
+
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v2
+
+      - name: Install Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install AWS SAM CLI
+        run: pip3 install aws-sam-cli
+
+      - name: Install Node JS
+        uses: actions/setup-node@v1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          registry-url: https://npm.pkg.github.com/
+          scope: '@ekonoo'
+
+      - name: Set PR Number
+        run: echo "prId=$(jq --raw-output '.pull_request.number // empty' "$GITHUB_EVENT_PATH")" >> $GITHUB_ENV
+
+      - name: Configure E2E AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CF_TEST_CORE_E2E_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_CF_TEST_CORE_E2E_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Remove e2e stack
+        run: make clean-e2e
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CF_TEST_CORE_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_CF_TEST_CORE_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Remove temporary stack
+        run: make clean-stack

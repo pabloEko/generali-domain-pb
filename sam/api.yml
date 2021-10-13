@@ -1,0 +1,218 @@
+# This whole file can be removed if
+# the project doesn't need an API
+
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  Layer:
+    Description: Layer containing node_modules
+    Type: String
+    Default: ""
+  ApiStageName:
+    Description: Api Stage Name
+    Type: String
+  ApiName:
+    Description: Api Name
+    Type: String
+  EnableApiTracing:
+    Description: Enable X-Ray tracing in API Gateway
+    Type: String
+    AllowedValues:
+      - "true"
+      - "false"
+  EnableLambdaTracing:
+    Description: Enable X-Ray tracing in Lambdas
+    Type: String
+    AllowedValues:
+      - Active
+      - PassThrough
+  IndividualUserPoolArn:
+    Description: Individuals User Pool ARN
+    Type: String
+  OrganizationUserPoolArn:
+    Description: Organization User Pool ARN
+    Type: String
+  AllowedOrigins:
+    Description: Allowed Origins
+    Type: String
+  AllowedHeaders:
+    Description: Allowed Headers
+    Type: String
+  DomainName:
+    Description: The domain name for the ApiGateway
+    Type: String
+  BaseDomain:
+    Description: The base domain name for adding the DNS records
+    Type: String
+  CertificateArn:
+    Description: The certificate ARN for the region
+    Type: String
+  LoggerLevel:
+    Description: "the logger lever used to filter output, can be on of error,warning,info,trace"
+    Type: String
+    Default: info
+  EventBusName:
+    Description: "the event bus used to put message and read messages. used to test the domain without interferences with others"
+    Type: String
+    Default: default
+  FifoQueuePrefix:
+    Description: "the prefix to add to the fifo queues, used to bypass a bug in sam"
+    Type: String
+  QueueReceiveCount:
+    Description: "the number of time a message will be sent before going to DLQ"
+    Type: Number
+    Default: 5
+
+Globals:
+  Function:
+    Runtime: nodejs12.x
+    Timeout: 180
+    Tracing: !Ref EnableLambdaTracing
+    Layers: !If [IsLayerEmpty, "", [!Ref Layer]] # Set default layer for all lambdas
+    # If is required here to pass a list of layers, or an empty string (not an empty list)
+    Environment:
+      Variables:
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+        LOGGER_LEVEL: !Ref LoggerLevel
+        NODE_OPTIONS: "--enable-source-maps"
+        EVENT_BUS_NAME: !Ref EventBusName
+
+Conditions:
+  IsLayerEmpty: !Equals [!Ref Layer, ""]
+
+Resources:
+  DummyApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Ref ApiName
+      StageName: !Ref ApiStageName
+      TracingEnabled: !Ref EnableApiTracing
+      EndpointConfiguration:
+        Type: REGIONAL
+      Auth:
+        Authorizers:
+          # Cognito Auth format: https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-property-api-cognitoauthorizer.html
+          # Lambda Token Auth format: https://docs.aws.amazon.com/serverless-application-model/latest/developerguide/sam-property-api-lambdatokenauthorizer.html
+          IndividualAuthorizer:
+            UserPoolArn: !Ref IndividualUserPoolArn
+            AuthorizationScopes:
+              - aws.cognito.signin.user.admin
+          OrganizationAuthorizer:
+            UserPoolArn: !Ref OrganizationUserPoolArn
+            AuthorizationScopes:
+              - aws.cognito.signin.user.admin
+          BothAuthorizer:
+            UserPoolArn:
+              - !Ref OrganizationUserPoolArn
+              - !Ref IndividualUserPoolArn
+            AuthorizationScopes:
+              - aws.cognito.signin.user.admin
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          DataTraceEnabled: true
+          LoggingLevel: INFO
+          MetricsEnabled: true
+          ThrottlingRateLimit: 5
+          ThrottlingBurstLimit: 10
+      GatewayResponses:
+        UNAUTHORIZED:
+          StatusCode: "401"
+          ResponseTemplates:
+            application/json: '{"message": $context.error.messageString}'
+          ResponseParameters:
+            Headers:
+              Access-Control-Allow-Origin: "'*'"
+      Cors:
+        AllowMethods: "'POST,GET,PUT'"
+        AllowHeaders: !Sub "'${AllowedHeaders}'"
+        AllowOrigin: !Sub "'${AllowedOrigins}'"
+        MaxAge: "'600'"
+
+      AccessLogSetting:
+        DestinationArn: !GetAtt DummyApiAccessLogGroup.Arn
+        Format: '$context.identity.sourceIp $context.authorizer.claims.sub [$context.requestTime] "$context.httpMethod $context.resourcePath $context.protocol" $context.status $context.requestId $context.awsEndpointRequestId $context.xrayTraceId $context.responseLatency $context.integrationLatency "$context.error.message"'
+
+  DummyDomainName:
+    Type: AWS::ApiGateway::DomainName
+    Properties:
+      DomainName: !Ref DomainName
+      RegionalCertificateArn: !Ref CertificateArn
+      SecurityPolicy: TLS_1_2
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+
+  DummyBasePathMapping:
+    Type: AWS::ApiGateway::BasePathMapping
+    Properties:
+      BasePath: !Ref ApiStageName
+      DomainName: !Ref DomainName
+      RestApiId: !Ref DummyApi
+      Stage: !Ref ApiStageName
+    # This dependency is a workaround for a bug in SAM / CF
+    # See https://github.com/aws/serverless-application-model/issues/192#issuecomment-406834837
+    DependsOn:
+      - DummyApiStage
+      - DummyDomainName
+
+  DummyDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneName: !Sub "${BaseDomain}."
+      AliasTarget:
+        DNSName: !GetAtt DummyDomainName.RegionalDomainName
+        EvaluateTargetHealth: false
+        HostedZoneId: !GetAtt DummyDomainName.RegionalHostedZoneId
+      Name: !Ref DomainName
+      Type: A
+
+  DummyApiAccessLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      RetentionInDays: 365
+
+  DummyResourceGet:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../dist/dummy-resource
+      Handler: get.handler
+      Environment:
+        Variables:
+          InvestorProfileTableName: DummyTableName
+      Events:
+        GetDummyResource:
+          Type: Api
+          Properties:
+            Auth:
+              Authorizer: OrganizationAuthorizer
+            RestApiId: !Ref DummyApi
+            Path: /dummy
+            Method: get
+
+  DummyResourcePost:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../dist/dummy-resource
+      Handler: post.handler
+      Environment:
+        Variables:
+          InvestorProfileTableName: DummyTableName
+      Events:
+        GetDummyResource:
+          Type: Api
+          Properties:
+            Auth:
+              Authorizer: IndividualAuthorizer
+            RestApiId: !Ref DummyApi
+            Path: /dummy
+            Method: post
+
+Outputs:
+  ApiId:
+    Description: API ID
+    Value: !Ref DummyApi
+  ApiUrl:
+    Description: API Endpoint
+    Value: !Sub "${DummyApi}.execute-api.${AWS::Region}.amazonaws.com"

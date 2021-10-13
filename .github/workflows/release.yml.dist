@@ -1,0 +1,107 @@
+name: Release deployment (Preprod & Prod)
+
+on:
+  release:
+    types: [published]
+
+env:
+  CI: true
+  gitVersion: ${{ github.ref }}
+  SAM_CLI_TELEMETRY: 0
+  NODE_VERSION: "12.13.0"
+  PYTHON_VERSION: "3.8"
+  AWS_REGION: eu-west-1
+  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+  AWS_RETRY_MODE: adaptive
+
+jobs:
+  deploy-preprod:
+    environment: preprod
+    runs-on: ubuntu-20.04
+
+    env:
+      env: staging
+      monitoringEmail: infra-team@ekonoo.com
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v2
+
+      - uses: actions/setup-node@v1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: actions/setup-python@v2
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install AWS CLI
+        run: pip3 install aws-sam-cli
+
+      - name: Configure PreProd AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CF_PREPROD_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_CF_PREPROD_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Webpack build
+        run: make build
+
+      - name: Package CloudFormation
+        run: make package
+
+      - name: Deploy CloudFormation
+        run: make deploy
+
+      - name: Deploy Alerting
+        run: make deploy-alerting
+
+      - name: trigger management ON_DEPLOY
+        run: make trigger-on-deployed
+
+  deploy-prod:
+    environment: prod
+    runs-on: ubuntu-20.04
+    needs: deploy-preprod
+
+    env:
+      env: staging
+      monitoringEmail: monitoring@ekonoo.com
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v2
+
+      - uses: actions/setup-node@v1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - uses: actions/setup-python@v2
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install AWS CLI
+        run: pip3 install aws-sam-cli
+
+      - name: Configure Prod AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CF_PROD_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_CF_PROD_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Webpack build
+        run: make build
+
+      - name: Package CloudFormation
+        run: make package
+
+      - name: Deploy CloudFormation
+        run: make deploy
+
+      - name: Deploy Alerting
+        run: make deploy-alerting
+
+      - name: trigger management ON_DEPLOY
+        run: make trigger-on-deployed

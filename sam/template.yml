@@ -1,0 +1,174 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  # These parameters can be removed if
+  # the project doesn't need an API
+  ApiStageName:
+    Description: Api Stage Name
+    Type: String
+  ApiName:
+    Description: Api Name
+    Type: String
+  EnableApiTracing:
+    Description: Enable X-Ray tracing in API Gateway
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+  EnableLambdaTracing:
+    Description: Enable X-Ray tracing in Lambdas
+    Type: String
+    Default: Active
+    AllowedValues:
+      - Active
+      - PassThrough
+  IndividualUserPoolArn:
+    Description: Individuals User Pool ARN
+    Type: String
+  OrganizationUserPoolArn:
+    Description: Organization User Pool ARN
+    Type: String
+  AllowedOrigins:
+    Description: Allowed Origins
+    Type: String
+  AllowedHeaders:
+    Description: Allowed Headers
+    Type: String
+  DomainName:
+    Description: The domain name for the ApiGateway
+    Type: String
+  BaseDomain:
+    Description: The base domain name for adding the DNS records
+    Type: String
+  CertificateArn:
+    Description: The certificate ARN for the region
+    Type: String
+  LoggerLevel:
+    Description: "the logger lever used to filter output, can be on of error,warning,info,trace"
+    Type: String
+    Default: info
+  EventBusName:
+    Description: "the event bus used to put message and read messages. used to test the domain without interferences with others"
+    Type: String
+    Default: default
+  CreateEventBus:
+    Type: String
+    Default: false
+  QueueReceiveCount:
+    Type: Number
+    Default: 5
+  BatchSize:
+    Type: Number
+    Default: 5
+  ServiceName:
+    Description: "the name of the service for the management layer. make sur it’s the same on all lambdas for the service"
+    Type: String
+
+Conditions:
+  IsCustomEventBus: !Equals [!Ref CreateEventBus, "true"]
+
+Globals:
+  Function:
+    Runtime: nodejs12.x
+    Timeout: 180
+    Tracing: Active
+    Environment:
+      Variables:
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+        LOGGER_LEVEL: !Ref LoggerLevel
+        NODE_OPTIONS: "--enable-source-maps"
+        EVENT_BUS_NAME: !If [IsCustomEventBus, !Ref EventBus, "default"]
+
+Resources:
+  NodeModulesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub "${AWS::StackName}-NodeModulesLayer"
+      Description: node modules
+      ContentUri: ../dist/layer
+      CompatibleRuntimes:
+        - nodejs12.x
+
+  EventBus:
+    Type: AWS::Events::EventBus
+    Condition: IsCustomEventBus
+    Properties:
+      Name: !Ref EventBusName
+
+  AsyncLambdaApp:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: ./async.yml
+      Parameters:
+        Layer: !Ref NodeModulesLayer
+        EnableLambdaTracing: !Ref EnableLambdaTracing
+        LoggerLevel: !Ref LoggerLevel
+        EventBusName: !If [IsCustomEventBus, !Ref EventBus, "default"]
+        QueueReceiveCount: !Ref QueueReceiveCount
+        BatchSize: !Ref BatchSize
+        FifoQueuePrefix: !Ref AWS::StackName
+
+  # This nested stack can be removed if
+  # the project doesn't need an API
+  DummyApi:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: ./api.yml
+      Parameters:
+        Layer: !Ref NodeModulesLayer
+        ApiName: !Ref ApiName
+        ApiStageName: !Ref ApiStageName
+        EnableApiTracing: !Ref EnableApiTracing
+        EnableLambdaTracing: !Ref EnableLambdaTracing
+        IndividualUserPoolArn: !Ref IndividualUserPoolArn
+        OrganizationUserPoolArn: !Ref OrganizationUserPoolArn
+        AllowedHeaders: !Ref AllowedHeaders
+        AllowedOrigins: !Ref AllowedOrigins
+        DomainName: !Ref DomainName
+        BaseDomain: !Ref BaseDomain
+        CertificateArn: !Ref CertificateArn
+        LoggerLevel: !Ref LoggerLevel
+        EventBusName: !If [IsCustomEventBus, !Ref EventBus, "default"]
+        FifoQueuePrefix: !Ref AWS::StackName
+
+
+  Management:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: ./management.yml
+      Parameters:
+        Layer: !Ref NodeModulesLayer
+        EventBusName: !If [ IsCustomEventBus, !Ref EventBus, 'default' ]
+        FifoQueuePrefix: !Sub '${AWS::StackName}'
+        QueueTimeout: 35
+        LoggerLevel: !Ref LoggerLevel
+        DynamoTable: !GetAtt DynamoApp.Outputs.TableName  # note that this is not required if you only use custom Actions or rpc without response handling
+        ServiceName: !Ref ServiceName
+
+
+  DummyResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name: !Sub "${AWS::StackName}-resource-group"
+      Description: !Sub "${AWS::StackName} Resource Group"
+      ResourceQuery:
+        Type: TAG_FILTERS_1_0
+        Query:
+          ResourceTypeFilters:
+            - AWS::AllSupported
+          TagFilters:
+            - Key: ekonoo:cloudformation:stack-name
+              Values:
+                - !Ref AWS::StackName
+
+# These outputs can be removed if
+# the project doesn't need an API
+Outputs:
+  DummyApiId:
+    Description: API ID
+    Value: !GetAtt DummyApi.Outputs.ApiId
+  DummyApiUrl:
+    Description: API Endpoint
+    Value: !GetAtt DummyApi.Outputs.ApiUrl

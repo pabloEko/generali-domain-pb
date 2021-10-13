@@ -1,0 +1,193 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Ekonoo Dummy Domain health monitoring (test)
+
+Parameters:
+  ApiName:
+    Type: String
+  ApiStage:
+    Type: String
+  LambdaName:
+    Type: String
+  DeadLetterQueueName:
+    Type: String
+  DlqName1:
+    Type: String
+  DlqName2:
+    Type: String
+
+Resources:
+  # Available AWS Alerts for API Gateway
+  # https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-metrics-and-dimensions.html
+  APIGatewayHigh5xxErrorVolume:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: API Gateway excessive 500 errors
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Threshold: 0.2 # The average of an API Gateway 4xx and 5xx error is a percentage and not a count
+      Statistic: Average
+      EvaluationPeriods: 5
+      Period: 60
+      MetricName: 5XXError
+      Namespace: AWS/ApiGateway
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref ApiName
+        - Name: Stage
+          Value: !Ref ApiStage
+
+  APIGatewayHigh4xxErrorVolume:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: API Gateway excessive 400 errors
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Threshold: 0.2 # The average of an API Gateway 4xx and 5xx error is a percentage and not a count
+      Statistic: Average
+      EvaluationPeriods: 5
+      Period: 60
+      MetricName: 4XXError
+      Namespace: AWS/ApiGateway
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref ApiName
+        - Name: Stage
+          Value: !Ref ApiStage
+
+  APIGatewayHighLatency:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: API Gateway excessive latency
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      Threshold: 500
+      Statistic: Average
+      EvaluationPeriods: 5
+      Period: 60
+      MetricName: Latency
+      Namespace: AWS/ApiGateway
+      Dimensions:
+        - Name: ApiName
+          Value: !Ref ApiName
+        - Name: Stage
+          Value: !Ref ApiStage
+
+  LambdaExcessiveConcurrentExecutions:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      EvaluationPeriods: 1
+      Threshold: 50
+      Period: 60
+      Statistic: Maximum
+      MetricName: ConcurrentExecutions
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaName
+
+  LambdaExcessiveAverageRuntime:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      EvaluationPeriods: 2
+      Threshold: 500 # Milliseconds
+      Period: 60
+      Statistic: Average
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref LambdaName
+
+  LambdaExcessiveErrorRate: # For this example we accept a 5% error rate
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ComparisonOperator: LessThanOrEqualToThreshold
+      EvaluationPeriods: 2
+      Threshold: 95
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: errors
+          ReturnData: False
+          MetricStat:
+            Period: 60
+            Stat: Sum
+            Metric:
+              MetricName: Errors
+              Namespace: AWS/Lambda
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref LambdaName
+        - Id: invocations
+          ReturnData: False
+          MetricStat:
+            Period: 60
+            Stat: Sum
+            Metric:
+              MetricName: Invocations
+              Namespace: AWS/Lambda
+              Dimensions:
+                - Name: FunctionName
+                  Value: !Ref LambdaName
+        - Id: availability
+          Expression: 100 - 100 * errors / MAX([errors, invocations])
+          Label: SuccessRate
+
+  # Alert for a single DLQ receiving a message
+  DLQEventReceived:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "There are failed messages in the dead letter queue."
+      TreatMissingData: notBreaching
+      Namespace: AWS/SQS
+      MetricName: ApproximateNumberOfMessagesVisible
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: QueueName
+          Value: !Ref DeadLetterQueueName
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 0
+
+  # Custom metric to sum all DLQ messages
+  DLQEventReceivedSum:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmDescription: "There are failed messages in a dead letter queue."
+      ComparisonOperator: GreaterThanThreshold
+      EvaluationPeriods: 1
+      Threshold: 0
+      TreatMissingData: notBreaching
+      Metrics:
+        - Id: dlq_name_1
+          ReturnData: False
+          MetricStat:
+            Period: 60
+            Stat: Sum
+            Metric:
+              MetricName: ApproximateNumberOfMessagesVisible
+              Namespace: AWS/SQS
+              Dimensions:
+                - Name: QueueName
+                  Value: !Ref DlqName1
+        - Id: dlq_name_2
+          ReturnData: False
+          MetricStat:
+            Period: 60
+            Stat: Sum
+            Metric:
+              MetricName: ApproximateNumberOfMessagesVisible
+              Namespace: AWS/SQS
+              Dimensions:
+                - Name: QueueName
+                  Value: !Ref DlqName2
+        - Id: total_notification_repo
+          Expression: SUM([
+            dlq_name1,
+            dlq_name2])
+          Label: SumOfVisibleEvents

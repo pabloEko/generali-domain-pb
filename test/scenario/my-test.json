@@ -1,0 +1,100 @@
+// this is parsed as json5, so you have: comment, multiline-string, trailing coma support, unquoted object attributes
+{
+    "name": "replace me",
+    "description": "describe me",
+    "templates": {
+        // templates can be reused by $.executeTemplate(`myTemplate`, {value: value})
+        "myTemplate": {
+            "somekey": 42,
+            // this dynamicKey end with .$, so it will interpret the provided context
+            "dynamicKey.$": "value"
+        }
+    },
+    // list of steps: https://github.com/ekonoo/ekonoo-testing/blob/master/docs/steps.md
+    "steps": [
+        {
+            "ErrorMonitor": {
+                "name": "monitor errors",
+                "type": "ErrorMonitor",
+                "param": {
+                    "stacks": ["ekonoo-domain-dummy"]
+                }
+            }
+        },
+        // configure the DUMMY settings
+        {
+            "ManagementRpcCall": {
+                "name": "send config",
+                "type": "ManagementRpcCall",
+                "param": {
+                    "action": "CONFIGURATION_SAVE",
+                    "sender": "testing",
+                    "target": [
+                        "ekonoo-domain-dummy"
+                    ],
+                    "waitResponse": true,
+                    "timeout": 30,
+                    "payload": {
+                        "configuration": {
+                            "version": 1,
+                            "id.$": "`someId`",
+                            "type": "DUMMY",
+                            "data": {
+                                "dummy": {
+                                    "foo": "bar"
+                                }
+                            }
+                        }
+                    }
+                },
+                "expectations": [
+                    "expect(result.responses[`ekonoo-domain-dummy`].success).toBe(true)"
+                ]
+            }
+        },
+        {
+            "SendEvent": {
+                "type": "SendEvent",
+                "name": "send some events",
+                "param": {
+                    "detailType": "running",
+                    "source": "lu.ekonoo.testing.test",
+                    "payload": {
+                        "type": "TEST_RUNNING",
+                        "testName": "some other test",
+                        "state": "done",
+                        "done": true,
+                        "complex.$": "$.executeTemplate(`myTemplate`, {value: 72})"
+                    }
+                }
+            }
+        },
+        {
+            "WaitForEvent": {
+                "type": "WaitForEvent",
+                "name": "wait for test running",
+                "param": {
+                    "filter": {
+                        "source": [
+                            "lu.ekonoo.testing.test"
+                        ],
+                        "detail-type": [
+                            "running"
+                        ],
+                        "detail": {
+                            "done": [
+                                true
+                            ]
+                        }
+                    },
+                    "count": 1,
+                    "timeout": 30
+                },
+                "expectations": [
+                    "expect(result.events.map(e => e.detail.state).sort()).toEqual([`done`].sort())",
+                    "$.debug(result.lastEvent)"
+                ]
+            }
+        }
+    ]
+}

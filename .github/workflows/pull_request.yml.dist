@@ -1,0 +1,112 @@
+name: Pull Request deployment (Test)
+
+on:
+  pull_request:
+    branches: [master]
+    paths-ignore:
+      - "README.md"
+
+env:
+  CI: true
+  env: test
+  gitVersion: ${{ github.ref }}
+  SAM_CLI_TELEMETRY: 0
+  NODE_VERSION: "12.13.0"
+  PYTHON_VERSION: "3.8"
+  AWS_REGION: eu-west-1
+  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+  AWS_RETRY_MODE: adaptive
+
+jobs:
+  deploy-pr:
+    runs-on: ubuntu-20.04
+    environment: test
+
+    if: github.actor != 'dependabot[bot]'
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Install Node JS
+        uses: actions/setup-node@v1
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install AWS SAM CLI
+        run: pip3 install cfn-lint aws-sam-cli
+
+      - name: Run cfn-lint
+        run: |
+          cfn-lint && statusCode=$? || statusCode=$?
+          [ ! $((($statusCode & 0x2))) -eq 2 ]
+
+      - name: Set PR Number
+        run: echo "prId=$(jq --raw-output '.pull_request.number // empty' "$GITHUB_EVENT_PATH")" >> $GITHUB_ENV
+
+      - name: Cache build
+        id: cache-build
+        uses: actions/cache@v2
+        with:
+          path: |
+            dist
+            node_modules
+          key: ${{ env.prId }}-build-${{ env.env }}-${{ hashFiles('**/package-lock.json', 'sam/**', 'src/**') }}
+
+      - name: Webpack build
+        if: steps.cache-build.outputs.cache-hit != 'true'
+        run: make build
+
+      - name: Cache package
+        id: cache-package
+        uses: actions/cache@v2
+        with:
+          path: |
+            template-output.yml
+            init-stack.outputs
+          key: ${{ env.prId }}-package-${{ env.env }}-${{ hashFiles('**/package-lock.json', 'sam/**', 'src/**') }}
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CF_TEST_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_CF_TEST_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Package CloudFormation
+        if: steps.cache-package.outputs.cache-hit != 'true'
+        run: make package
+
+      - name: Deploy CloudFormation
+        run: make deploy
+
+      - name: Configure E2E AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          aws-access-key-id: ${{ secrets.AWS_CF_TEST_E2E_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_CF_TEST_E2E_SECRET_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Test E2E
+        if: ${{ github.event_name == 'pull_request' }}
+        run: make test-e2e
+
+      - uses: actions/upload-artifact@v2
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        with:
+          name: e2e-results
+          path: report.xml
+
+      - name: Publish E2E Test Results
+        uses: EnricoMi/publish-unit-test-result-action@v1.6
+        if: ${{ always() && github.event_name == 'pull_request' }}
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          files: report.xml
