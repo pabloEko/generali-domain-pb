@@ -1,0 +1,369 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Description: Workflow for profit sharing
+
+Globals:
+  Function:
+    Runtime: nodejs12.x
+    Timeout: !Ref LambdaTimeout
+    Tracing: !Ref EnableLambdaTracing
+    Layers: !If [IsLayerEmpty, "", [!Ref Layer]]
+    Environment:
+      Variables:
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+        LOGGER_LEVEL: !Ref LoggerLevel
+        NODE_OPTIONS: "--enable-source-maps"
+        EVENT_BUS_NAME: !Ref EventBusName
+
+Conditions:
+  IsLayerEmpty: !Equals [!Ref Layer, ""]
+
+Parameters:
+  EnableLambdaTracing:
+    Description: Enable X-Ray tracing in Lambdas
+    Type: String
+    AllowedValues:
+      - Active
+      - PassThrough
+  QueueTimeout:
+    Type: Number
+    Default: 120
+  EventBusName:
+    Description: "the event bus used to put message and read messages. used to test the domain without interferences with others"
+    Type: String
+    Default: default
+  FifoQueuePrefix:
+    Description: "the prefix to add to the fifo queues, used to bypass a bug in sam"
+    Type: String
+  QueueReceiveCount:
+    Description: "the number of time a message will be sent before going to DLQ"
+    Type: Number
+    Default: 5
+  Layer:
+    Description: Layer containing node_modules
+    Type: String
+    Default: ""
+  LambdaTimeout:
+    Type: Number
+    Default: 120
+  LoggerLevel:
+    Description: "the logger lever used to filter output, can be on of error,warning,info,trace"
+    Type: String
+    Default: info
+  BatchSize:
+    Type: Number
+    MinValue: 1
+    MaxValue: 10
+    Default: 10
+
+  DatalakeDataBucketName:
+    Description: Datalake V2 Data Bucket
+    Type: String
+  ProfitSharingTableName:
+    Description: Dynamo table of the profit sharing
+    Type: String
+
+Resources:
+  ### BUCKETS ###
+
+  AthenaResultBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  AthenaResultBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref AthenaResultBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: AllowSSLRequestsOnly
+            Action: s3:*
+            Effect: Deny
+            Resource:
+              - !Sub "arn:${AWS::Partition}:s3:::${AthenaResultBucket}"
+              - !Sub "arn:${AWS::Partition}:s3:::${AthenaResultBucket}/*"
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+            Principal: "*"
+
+  # ProfitSharingLambda:
+  #   Type: AWS::Serverless::Function
+  #   Properties:
+  #     Handler: index.handler
+  #     CodeUri: ../dist/start-profit-sharing
+  #     MemorySize: 512
+  #     Events:
+  #       AllEvent:
+  #         Type: SQS
+  #         Properties:
+  #           Queue: !GetAtt ProfitSharingQueue.Arn
+  #           BatchSize: !Ref BatchSize
+  #     Environment:
+  #       Variables:
+  #         SECRET_ARN: !Ref DBSecret
+  #         CLUSTER_ARN: !Ref DBCluster
+  #         DB_NAME: !Ref DBName
+  #         QUEUE_RECEIVE_COUNT: !Ref QueueReceiveCount
+  #         ES_DOMAIN: !Ref ElasticSearchDomainEndpoint
+  #         LOCAL_TEST: true
+  #         GUARANTEE: 0
+  #     Policies:
+  #       - EventBridgePutEventsPolicy:
+  #           EventBusName: !Ref EventBusName
+  #       - StepFunctionsExecutionPolicy:
+  #           StateMachineName: !GetAtt ProfitSharingStateMachine.Name
+  #       - Version: "2012-10-17"
+  #         Statement:
+  #           - Effect: Allow
+  #             Action:
+  #               - rds-data:*
+  #             Resource: !Ref DBCluster
+  #           - Effect: Allow
+  #             Action:
+  #               - secretsmanager:GetSecretValue
+  #             Resource: !Ref DBSecret
+  #       - Version: "2012-10-17"
+  #         Statement:
+  #           - Effect: "Allow"
+  #             Action:
+  #               - "es:ESHttp*"
+  #             Resource:
+  #               - "*"
+
+  Init:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      CodeUri: ../dist/state-machine/init
+      MemorySize: 512
+      Events:
+        AllEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ProfitSharingQueue.Arn
+            BatchSize: !Ref BatchSize
+      Environment:
+        Variables:
+          PROFIT_SHARE_TABLE: !Ref ProfitSharingTableName
+          QUEUE_RECEIVE_COUNT: !Ref QueueReceiveCount
+          # SECRET_ARN: !Ref DBSecret
+          # CLUSTER_ARN: !Ref DBCluster
+          # DB_NAME: !Ref DBName
+          # ES_DOMAIN: !Ref ElasticSearchDomainEndpoint
+          # LOCAL_TEST: true
+          # GUARANTEE: 0
+          STATE_MACHINE_ARN: !Ref ProfitSharingStateMachine
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ProfitSharingTableName
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !GetAtt ProfitSharingStateMachine.Name
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref EventBusName
+
+  Process:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      CodeUri: ../dist/state-machine/process
+      MemorySize: 512
+      Environment:
+        Variables:
+          QUEUE_RECEIVE_COUNT: !Ref QueueReceiveCount
+      Policies:
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref EventBusName
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - athena:GetQueryResults
+              Resource:
+                - !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/*"
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource:
+                - !Sub "arn:aws:s3:::${AthenaResultBucket}/*"
+
+  Publish:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      CodeUri: ../dist/state-machine/publish
+      MemorySize: 512
+      Environment:
+        Variables:
+          # SECRET_ARN: !Ref DBSecret
+          # CLUSTER_ARN: !Ref DBCluster
+          # DB_NAME: !Ref DBName
+          QUEUE_RECEIVE_COUNT: !Ref QueueReceiveCount
+          PROFIT_SHARE_TABLE: !Ref ProfitSharingTableName
+          # ES_DOMAIN: !Ref ElasticSearchDomainEndpoint
+          # LOCAL_TEST: true
+          # GUARANTEE: 0
+      Policies:
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref EventBusName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ProfitSharingTableName
+
+  # TestPb:
+  #   Type: AWS::Serverless::Function
+  #   Properties:
+  #     Handler: index.handler
+  #     CodeUri: ../dist/insert-data
+  #     MemorySize: 512
+  #     Environment:
+  #       Variables:
+  #         SECRET_ARN: !Ref DBSecret
+  #         CLUSTER_ARN: !Ref DBCluster
+  #         DB_NAME: !Ref DBName
+  #         QUEUE_RECEIVE_COUNT: !Ref QueueReceiveCount
+  #         ES_DOMAIN: !Ref ElasticSearchDomainEndpoint
+  #     Policies:
+  #       - EventBridgePutEventsPolicy:
+  #           EventBusName: !Ref EventBusName
+  #       - Version: "2012-10-17"
+  #         Statement:
+  #           - Effect: Allow
+  #             Action:
+  #               - rds-data:*
+  #             Resource: !Ref DBCluster
+  #           - Effect: Allow
+  #             Action:
+  #               - secretsmanager:GetSecretValue
+  #             Resource: !Ref DBSecret
+
+  ### STATE MACHINE ###
+  ProfitSharingStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: "../src/state-machines/profit-sharing.asl.json"
+      DefinitionSubstitutions:
+        ProcessArn: !GetAtt Process.Arn
+        PublishArn: !GetAtt Publish.Arn
+        AthenaResultBucket: !Sub s3://${AthenaResultBucket}
+        # InitArn: !GetAtt Init.Arn
+        # QueryArn: !GetAtt Query.Arn
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref Publish
+        - LambdaInvokePolicy:
+            FunctionName: !Ref Process
+        - Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Action:
+                - athena:StartQueryExecution # Used to start query
+                - athena:GetQueryExecution # Used at the end of start after the .sync
+              Resource:
+                - !Sub "arn:aws:athena:${AWS::Region}:${AWS::AccountId}:workgroup/*"
+            - Effect: Allow # Read parquet files in datalake S3
+              Action:
+                - s3:GetObject
+                - s3:ListBucket
+              Resource:
+                - !Sub "arn:aws:s3:::${DatalakeDataBucketName}"
+                - !Sub "arn:aws:s3:::${DatalakeDataBucketName}/curated/*"
+            - Effect: Allow # Save query response
+              Action:
+                - s3:PutObject
+                - s3:GetBucketLocation # Used by athena to verify the bucket
+              Resource:
+                - !Sub "arn:aws:s3:::${AthenaResultBucket}"
+                - !Sub "arn:aws:s3:::${AthenaResultBucket}/*"
+            - Effect: Allow # Tables read from in the SQL query
+              Action:
+                - glue:GetTable
+              Resource:
+                - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:catalog"
+                - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:database/datalake-curated-db-*"
+                - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/datalake-curated-db-*/*"
+                - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/datalake-curated-db-*/curated_organization_deal"
+                - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/datalake-curated-db-*/curated_wallet_item"
+                - !Sub "arn:aws:glue:${AWS::Region}:${AWS::AccountId}:table/datalake-curated-db-*/curated_individual_guarantee"
+
+  ### QUEUES ###
+
+  # Queue for listening to euro fund domain to start the process of calcul of the pb
+  ProfitSharingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${FifoQueuePrefix}-start-profit-sharing.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: !Ref QueueTimeout
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt ProfitSharingDLQ.Arn
+        maxReceiveCount: !Ref QueueReceiveCount
+
+  ProfitSharingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${FifoQueuePrefix}-start-profit-sharing-DLQ.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+
+  ProfitSharingRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref EventBusName
+      EventPattern:
+        source:
+          - lu.ekonoo.euro-fund.generali-profit-sharing
+        detail-type:
+          - start
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt ProfitSharingQueue.Arn
+          SqsParameters:
+            MessageGroupId: "all-events"
+          Id: "ProfitSharingId"
+
+  ProfitSharingQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref ProfitSharingQueue
+      PolicyDocument:
+        Statement:
+          - Action:
+              - "SQS:SendMessage"
+            Effect: "Allow"
+            Resource: !GetAtt ProfitSharingQueue.Arn
+            Principal:
+              Service:
+                - "events.amazonaws.com"
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt ProfitSharingRule.Arn
+
+Outputs:
+  ProfitSharingQueueName:
+    Description: Profit Sharing queue name
+    Value: !GetAtt ProfitSharingQueue.QueueName
+  ProfitSharingQueueArn:
+    Description: Profit Sharing queue arn
+    Value: !GetAtt ProfitSharingQueue.Arn
+
+  ProfitSharingStateMachineArn:
+    Description: Profit Sharing state machine ARN
+    Value: !Ref ProfitSharingStateMachine
+  ProfitSharingStateMachineName:
+    Description: Profit Sharing state machine Name
+    Value: !GetAtt ProfitSharingStateMachine.Name

@@ -1,0 +1,60 @@
+{
+    "Comment": "State machine for process the calcul of the profit sharing",
+    "StartAt": "AthenaQuery",
+    "States": {
+        "AthenaQuery": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::athena:startQueryExecution.sync",
+            "Parameters": {
+                "QueryString.$": "$.query",
+                "WorkGroup": "primary",
+                "ResultConfiguration": {
+                    "OutputLocation": "${AthenaResultBucket}"
+                },
+                "QueryExecutionContext": {
+                    "Database": "datalake-curated-db-dev"
+                }
+            },
+            "ResultPath": "$.athenaResult",
+            "ResultSelector": {
+                "QueryExecutionId.$": "$.QueryExecution.QueryExecutionId",
+                "NextToken": null
+            },
+            "Next": "Process"
+        },
+        "Process": {
+            "Type": "Task",
+            "Resource": "${ProcessArn}",
+            "Next": "Publish",
+            "Comment": "This lambda will wait and receive the response of the query with all the information and calcul the pb"
+        },
+        "Publish": {
+            "Type": "Task",
+            "Resource": "${PublishArn}",
+            "Next": "HasMore",
+            "Comment": "This lambda will save the wallet items in db and publish them"
+        },
+        "HasMore": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "And": [
+                        {
+                            "Variable": "$.AthenaResult.NextToken",
+                            "IsPresent": true
+                        },
+                        {
+                            "Variable": "$.AthenaResult.NextToken",
+                            "IsNull": false
+                        }
+                    ],
+                    "Next": "Process"
+                }
+            ],
+            "Default": "End"
+        },
+        "End": {
+            "Type": "Succeed"
+        }
+    }
+}

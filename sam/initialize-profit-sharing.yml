@@ -1,0 +1,154 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Description: Initialize profit sharing
+
+Globals:
+  Function:
+    Runtime: nodejs12.x
+    Timeout: !Ref LambdaTimeout
+    Tracing: !Ref EnableLambdaTracing
+    Layers: !If [IsLayerEmpty, "", [!Ref Layer]]
+    Environment:
+      Variables:
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+        LOGGER_LEVEL: !Ref LoggerLevel
+        NODE_OPTIONS: "--enable-source-maps"
+        EVENT_BUS_NAME: !Ref EventBusName
+
+Conditions:
+  IsLayerEmpty: !Equals [!Ref Layer, ""]
+
+Parameters:
+  EnableLambdaTracing:
+    Description: Enable X-Ray tracing in Lambdas
+    Type: String
+    AllowedValues:
+      - Active
+      - PassThrough
+  QueueTimeout:
+    Type: Number
+    Default: 120
+  EventBusName:
+    Description: "the event bus used to put message and read messages. used to test the domain without interferences with others"
+    Type: String
+    Default: default
+  FifoQueuePrefix:
+    Description: "the prefix to add to the fifo queues, used to bypass a bug in sam"
+    Type: String
+  QueueReceiveCount:
+    Description: "the number of time a message will be sent before going to DLQ"
+    Type: Number
+    Default: 5
+  Layer:
+    Description: Layer containing node_modules
+    Type: String
+    Default: ""
+  LambdaTimeout:
+    Type: Number
+    Default: 120
+  LoggerLevel:
+    Description: "the logger lever used to filter output, can be on of error,warning,info,trace"
+    Type: String
+    Default: info
+  BatchSize:
+    Type: Number
+    MinValue: 1
+    MaxValue: 10
+    Default: 10
+  ProfitSharingTableName:
+    Type: String
+
+Resources:
+  # Lambda listening event from euro fund domain to initalize the pb of the last year
+
+  ### LAMBDAS ###
+
+  InitializeProfitSharingLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      CodeUri: ../dist/initialize-profit-sharing
+      MemorySize: 512
+      Events:
+        AllEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt InitializePBQueue.Arn
+            BatchSize: !Ref BatchSize
+      Environment:
+        Variables:
+          # SECRET_ARN: !Ref DBSecret
+          # CLUSTER_ARN: !Ref DBCluster
+          # DB_NAME: !Ref DBName
+          QUEUE_RECEIVE_COUNT: !Ref QueueReceiveCount
+          PROFIT_SHARE_TABLE: !Ref ProfitSharingTableName
+          # LOCAL_TEST: true
+          # GUARANTEE: 0
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ProfitSharingTableName
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref EventBusName
+
+  ### QUEUES ###
+
+  InitializePBQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${FifoQueuePrefix}-init-profit-sharing.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+      VisibilityTimeout: !Ref QueueTimeout
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt InitializePBDLQ.Arn
+        maxReceiveCount: !Ref QueueReceiveCount
+
+  InitializePBDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${FifoQueuePrefix}-init-profit-sharing-DLQ.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+
+  InitializePBQueueRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref EventBusName
+      EventPattern:
+        source:
+          - lu.ekonoo.euro-fund.generali-profit-sharing
+        detail-type:
+          - initialize
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt InitializePBQueue.Arn
+          SqsParameters:
+            MessageGroupId: "all-events"
+          Id: "ProfitSharingId"
+
+  InitializePBQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref InitializePBQueue
+      PolicyDocument:
+        Statement:
+          - Action:
+              - "SQS:SendMessage"
+            Effect: "Allow"
+            Resource: !GetAtt InitializePBQueue.Arn
+            Principal:
+              Service:
+                - "events.amazonaws.com"
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt InitializePBQueueRule.Arn
+
+Outputs:
+  InitializePBQueueName:
+    Description: Calculation of Profit Sharing queue name
+    Value: !GetAtt InitializePBQueue.QueueName
+  InitializePBQueueArn:
+    Description: Calculation of Profit Sharing queue arn
+    Value: !GetAtt InitializePBQueue.Arn

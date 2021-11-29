@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+
+Description: Purchase flow
+
+Parameters:
+  EnableLambdaTracing:
+    Description: Enable X-Ray tracing in Lambdas
+    Type: String
+    AllowedValues:
+      - Active
+      - PassThrough
+  Layer:
+    Type: String
+  EventBusName:
+    Description: "the event bus used to put message and read messages. used to test the domain without interferences with others"
+    Type: String
+    Default: default
+  LoggerLevel:
+    Type: String
+    Default: info
+  LambdaTimeout:
+    Type: Number
+    Default: 120
+
+  BatchSize:
+    Type: Number
+    MinValue: 1
+    MaxValue: 10
+    Default: 10
+  QueueTimeout:
+    Type: Number
+    Default: 120
+  FifoQueuePrefix:
+    Description: "the prefix to add to the fifo queues, used to bypass a bug in sam"
+    Type: String
+  QueueReceiveCount:
+    Description: "the number of time a message will be sent before going to DLQ"
+    Type: Number
+    Default: 5
+  ProfitSharingTableName:
+    Description: Dynamo table of the profit sharing
+    Type: String
+  ProfitSharingStateMachineArn:
+    Description: State machine arn
+    Type: String
+  ProfitSharingStateMachineName:
+    Description: State machine name
+    Type: String
+  PurchaseScheduler:
+    Type: String
+    Default: cron(0 * ? * * *)
+    Description: A cron expression; run at 01h every 1 of the month (UTC time)
+
+Globals:
+  Function:
+    Runtime: nodejs12.x
+    Timeout: !Ref LambdaTimeout
+    Tracing: !Ref EnableLambdaTracing
+    Layers: !If [IsLayerEmpty, "", [!Ref Layer]]
+    Environment:
+      Variables:
+        AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+        LOGGER_LEVEL: !Ref LoggerLevel
+        NODE_OPTIONS: "--enable-source-maps"
+        EVENT_BUS_NAME: !Ref EventBusName
+
+Conditions:
+  IsLayerEmpty: !Equals [!Ref Layer, ""]
+
+Resources:
+  # event listening operation, to catch the purchases operation and see if is a total purchase
+
+  ### LAMBDAS ###
+
+  PurchaseOperation:
+    Type: AWS::Serverless::Function
+    Properties:
+      Timeout: 120
+      Handler: index.handler
+      CodeUri: ../dist/purchase/operation
+      Environment:
+        Variables:
+          PROFIT_SHARE_TABLE: !Ref ProfitSharingTableName
+          STATE_MACHINE_ARN: !Ref ProfitSharingStateMachineArn
+      Events:
+        SourceEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt PurchaseOperationQueue.Arn
+            BatchSize: !Ref BatchSize
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ProfitSharingTableName
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref EventBusName
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !Ref ProfitSharingStateMachineName
+
+  SchedulerPurchaseOperation:
+    Type: AWS::Serverless::Function
+    Properties:
+      Timeout: 120
+      Handler: index.handler
+      CodeUri: ../dist/purchase/scheduler
+      Environment:
+        Variables:
+          PROFIT_SHARE_TABLE: !Ref ProfitSharingTableName
+          STATE_MACHINE_ARN: !Ref ProfitSharingStateMachineArn
+      Events:
+        ScheduleEvent:
+          Type: Schedule
+          Properties:
+            Description: Run every half hour
+            Enabled: True
+            Schedule: !Ref PurchaseScheduler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ProfitSharingTableName
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref EventBusName
+        - StepFunctionsExecutionPolicy:
+            StateMachineName: !Ref ProfitSharingStateMachineName
+
+  ### QUEUES ###
+
+  # Queue for listening event from operation
+  PurchaseOperationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${FifoQueuePrefix}-pb-purchase-operation.fifo"
+      FifoQueue: true
+      VisibilityTimeout: !Ref QueueTimeout
+      ContentBasedDeduplication: true
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt PurchaseOperationQueueDLQ.Arn
+        maxReceiveCount: !Ref QueueReceiveCount
+
+  PurchaseOperationQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub "${FifoQueuePrefix}-pb-purchase-operation-DLQ.fifo"
+      FifoQueue: true
+      ContentBasedDeduplication: true
+
+  PurchaseOperationQueueRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventBusName: !Ref EventBusName
+      EventPattern:
+        source:
+          - lu.ekonoo.operation.operation
+        detail-type:
+          - executed
+      State: "ENABLED"
+      Targets:
+        - Arn: !GetAtt PurchaseOperationQueue.Arn
+          Id: "PBOpration"
+          SqsParameters:
+            MessageGroupId: "pb-operation"
+
+  OperationQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref PurchaseOperationQueue
+      PolicyDocument:
+        Statement:
+          - Action:
+              - "SQS:SendMessage"
+            Effect: "Allow"
+            Resource: !GetAtt PurchaseOperationQueue.Arn
+            Principal:
+              Service:
+                - "events.amazonaws.com"
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !GetAtt PurchaseOperationQueueRule.Arn

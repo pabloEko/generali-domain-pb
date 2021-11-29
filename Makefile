@@ -28,18 +28,9 @@ environmentInitStackName?=environment-init-stack
 certificateArn?=$(shell grep 'RegionalCertificate' $(environmentInitStackName).outputs | cut -f2)
 baseDomain?=$(shell grep 'DomainName' $(environmentInitStackName).outputs | cut -f2)
 
-# Fetch cognito stack outputs
-cognitoStackName?=ekonoo-cognito-$(env)
-individualUserPoolArn?=$(shell grep 'IndividualV2UserPoolArn' $(cognitoStackName).outputs | cut -f2)
-organizationUserPoolArn?=$(shell grep 'OrganizationUserPoolArn' $(cognitoStackName).outputs | cut -f2)
-
-# Fetch ElasticSearch outputs
-elasticSearchStackName?=ekonoo-domain-elasticsearch-$(env)
-elasticSearchDomainEndpoint?=$(shell grep 'ElasticSearchDomainEndpoint' $(elasticSearchStackName).outputs | cut -f2)
-elasticSearchMasterLambda?=$(shell grep 'MasterUserLambdaArn' $(elasticSearchStackName).outputs | cut -f2)
-
-# API base domain
-apiBaseDomain?=api.$(baseDomain)
+# Fetch Datalake outputs
+datalakeStackName?=ekonoo-domain-datalake-v2-$(env)
+datalakeDataBucketName?=$(shell grep 'DatalakeDataBucketName' $(datalakeStackName).outputs | cut -f2)
 
 allowedHeaders?=Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token
 allowedOrigins?=https://organization.$(baseDomain)
@@ -49,9 +40,6 @@ stackName?=${pkg-name}-$(stackSuffix)
 
 cfRole=arn:aws:iam::$(accountId):role/cloudformation-role
 
-apiStageName?=v1
-domainName?=dummy.$(apiBaseDomain)
-apiName?=Ekonoo Dummy Domain
 
 ifeq ($(env), test)
 ifneq ($(prId), )
@@ -94,7 +82,7 @@ endif
 
 # List all other stacks dependencies
 # elasticSearchStackName can be removed if unnecessary
-stackNames=$(initStackName) $(environmentInitStackName) $(cognitoStackName) $(elasticSearchStackName)
+stackNames=$(initStackName) $(environmentInitStackName) $(datalakeStackName)
 # Generate targets files names
 stackOutputs:=$(patsubst %, %.outputs, $(stackNames))
 
@@ -143,8 +131,8 @@ node_modules: ~/.npmrc package.json package-lock.json
 	@npm ci
 	@touch node_modules
 
+# @npm run test
 build: node_modules clean-package
-	@npm run test
 	@npm run build
 	@npm run build:layer
 
@@ -166,7 +154,7 @@ template-output.yml: $(initStackName).outputs
 # Parameters containing whitespace need to be heavily
 # escaped and the definition made very verbose
 # Otherwise the more simple Key=Value format can be used
-deploy: template-output.yml $(cognitoStackName).outputs $(environmentInitStackName).outputs
+deploy: template-output.yml $(datalakeStackName).outputs $(environmentInitStackName).outputs
 	@sam deploy \
 		--region $(region) \
 		--template-file template-output.yml \
@@ -180,14 +168,8 @@ deploy: template-output.yml $(cognitoStackName).outputs $(environmentInitStackNa
 			ekonoo:git:version=$(gitVersion) \
 			ekonoo:git:source=$(gitRepoName) \
 		--parameter-overrides "\
-			ParameterKey=ApiName,ParameterValue='$(apiName)'\
-			ParameterKey=ApiStageName,ParameterValue=$(apiStageName) \
-			ParameterKey=IndividualUserPoolArn,ParameterValue=$(individualUserPoolArn) \
-			ParameterKey=OrganizationUserPoolArn,ParameterValue=$(organizationUserPoolArn) \
 			ParameterKey=AllowedOrigins,ParameterValue=$(allowedOrigins) \
 			ParameterKey=AllowedHeaders,ParameterValue=$(allowedHeaders) \
-			ParameterKey=DomainName,ParameterValue=$(domainName) \
-			ParameterKey=BaseDomain,ParameterValue=$(baseDomain) \
 			ParameterKey=CertificateArn,ParameterValue=$(certificateArn) \
 			\
 			ParameterKey=EnableApiTracing,ParameterValue=$(enableApiTracing) \
@@ -196,7 +178,8 @@ deploy: template-output.yml $(cognitoStackName).outputs $(environmentInitStackNa
 			ParameterKey=LoggerLevel,ParameterValue=$(LoggerLevel) \
 			ParameterKey=QueueReceiveCount,ParameterValue=$(QueueReceiveCount) \
 			ParameterKey=EventBusName,ParameterValue=$(EventBusName) \
-			ParameterKey=CreateEventBus,ParameterValue=$(CreateEventBus)"
+			ParameterKey=CreateEventBus,ParameterValue=$(CreateEventBus) \
+			ParameterKey=DatalakeDataBucketName,ParameterValue=$(datalakeDataBucketName)"
 
 deploy-alerting: $(initStackName).outputs
 	@sam deploy \
