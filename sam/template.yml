@@ -4,19 +4,6 @@ Transform: AWS::Serverless-2016-10-31
 Parameters:
   # These parameters can be removed if
   # the project doesn't need an API
-  ApiStageName:
-    Description: Api Stage Name
-    Type: String
-  ApiName:
-    Description: Api Name
-    Type: String
-  EnableApiTracing:
-    Description: Enable X-Ray tracing in API Gateway
-    Type: String
-    Default: "true"
-    AllowedValues:
-      - "true"
-      - "false"
   EnableLambdaTracing:
     Description: Enable X-Ray tracing in Lambdas
     Type: String
@@ -24,24 +11,6 @@ Parameters:
     AllowedValues:
       - Active
       - PassThrough
-  IndividualUserPoolArn:
-    Description: Individuals User Pool ARN
-    Type: String
-  OrganizationUserPoolArn:
-    Description: Organization User Pool ARN
-    Type: String
-  AllowedOrigins:
-    Description: Allowed Origins
-    Type: String
-  AllowedHeaders:
-    Description: Allowed Headers
-    Type: String
-  DomainName:
-    Description: The domain name for the ApiGateway
-    Type: String
-  BaseDomain:
-    Description: The base domain name for adding the DNS records
-    Type: String
   CertificateArn:
     Description: The certificate ARN for the region
     Type: String
@@ -62,8 +31,7 @@ Parameters:
   BatchSize:
     Type: Number
     Default: 5
-  ServiceName:
-    Description: "the name of the service for the management layer. make sur it’s the same on all lambdas for the service"
+  DatalakeDataBucketName:
     Type: String
 
 Conditions:
@@ -97,10 +65,28 @@ Resources:
     Properties:
       Name: !Ref EventBusName
 
-  AsyncLambdaApp:
+  DynamoApp:
     Type: AWS::Serverless::Application
     Properties:
-      Location: ./async.yml
+      Location: ./dynamo.yml
+
+  # AsyncLambdaApp:
+  #   Type: AWS::Serverless::Application
+  #   Properties:
+  #     Location: ./async.yml
+  #     Parameters:
+  #       Layer: !Ref NodeModulesLayer
+  #       EnableLambdaTracing: !Ref EnableLambdaTracing
+  #       LoggerLevel: !Ref LoggerLevel
+  #       EventBusName: !If [IsCustomEventBus, !Ref EventBus, "default"]
+  #       QueueReceiveCount: !Ref QueueReceiveCount
+  #       BatchSize: !Ref BatchSize
+  #       FifoQueuePrefix: !Ref AWS::StackName
+
+  InitializeProfitSharing:
+    Type: AWS::Serverless::Application
+    Properties:
+      Location: ./initialize-profit-sharing.yml
       Parameters:
         Layer: !Ref NodeModulesLayer
         EnableLambdaTracing: !Ref EnableLambdaTracing
@@ -109,46 +95,40 @@ Resources:
         QueueReceiveCount: !Ref QueueReceiveCount
         BatchSize: !Ref BatchSize
         FifoQueuePrefix: !Ref AWS::StackName
+        ProfitSharingTableName: !GetAtt DynamoApp.Outputs.ProfitSharingTableName
 
-  # This nested stack can be removed if
-  # the project doesn't need an API
-  DummyApi:
+  Purchase:
     Type: AWS::Serverless::Application
     Properties:
-      Location: ./api.yml
+      Location: ./purchase.yml
       Parameters:
         Layer: !Ref NodeModulesLayer
-        ApiName: !Ref ApiName
-        ApiStageName: !Ref ApiStageName
-        EnableApiTracing: !Ref EnableApiTracing
         EnableLambdaTracing: !Ref EnableLambdaTracing
-        IndividualUserPoolArn: !Ref IndividualUserPoolArn
-        OrganizationUserPoolArn: !Ref OrganizationUserPoolArn
-        AllowedHeaders: !Ref AllowedHeaders
-        AllowedOrigins: !Ref AllowedOrigins
-        DomainName: !Ref DomainName
-        BaseDomain: !Ref BaseDomain
-        CertificateArn: !Ref CertificateArn
         LoggerLevel: !Ref LoggerLevel
         EventBusName: !If [IsCustomEventBus, !Ref EventBus, "default"]
+        QueueReceiveCount: !Ref QueueReceiveCount
+        BatchSize: !Ref BatchSize
         FifoQueuePrefix: !Ref AWS::StackName
+        ProfitSharingTableName: !GetAtt DynamoApp.Outputs.ProfitSharingTableName
+        ProfitSharingStateMachineArn: !GetAtt ProfitSharingWorkflow.Outputs.ProfitSharingStateMachineArn
+        ProfitSharingStateMachineName: !GetAtt ProfitSharingWorkflow.Outputs.ProfitSharingStateMachineName
 
-
-  Management:
+  ProfitSharingWorkflow:
     Type: AWS::Serverless::Application
     Properties:
-      Location: ./management.yml
+      Location: ./wf-profit-sharing.yml
       Parameters:
         Layer: !Ref NodeModulesLayer
-        EventBusName: !If [ IsCustomEventBus, !Ref EventBus, 'default' ]
-        FifoQueuePrefix: !Sub '${AWS::StackName}'
-        QueueTimeout: 35
+        EnableLambdaTracing: !Ref EnableLambdaTracing
         LoggerLevel: !Ref LoggerLevel
-        DynamoTable: !GetAtt DynamoApp.Outputs.TableName  # note that this is not required if you only use custom Actions or rpc without response handling
-        ServiceName: !Ref ServiceName
+        EventBusName: !If [IsCustomEventBus, !Ref EventBus, "default"]
+        QueueReceiveCount: !Ref QueueReceiveCount
+        BatchSize: !Ref BatchSize
+        FifoQueuePrefix: !Ref AWS::StackName
+        ProfitSharingTableName: !GetAtt DynamoApp.Outputs.ProfitSharingTableName
+        DatalakeDataBucketName: !Ref DatalakeDataBucketName
 
-
-  DummyResourceGroup:
+  GeneraliPBResourceGroup:
     Type: AWS::ResourceGroups::Group
     Properties:
       Name: !Sub "${AWS::StackName}-resource-group"
@@ -162,13 +142,5 @@ Resources:
             - Key: ekonoo:cloudformation:stack-name
               Values:
                 - !Ref AWS::StackName
+# Outputs:
 
-# These outputs can be removed if
-# the project doesn't need an API
-Outputs:
-  DummyApiId:
-    Description: API ID
-    Value: !GetAtt DummyApi.Outputs.ApiId
-  DummyApiUrl:
-    Description: API Endpoint
-    Value: !GetAtt DummyApi.Outputs.ApiUrl
